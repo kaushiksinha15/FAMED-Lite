@@ -1,0 +1,119 @@
+FAMED-lite — Changes Log
+========================
+Session: 2026-03-28 to 2026-03-31
+========================
+
+
+BUGS FIXED
+----------
+
+1. modules/fusion.py
+   - Removed stale `LogisticRegression` import (dead code after meta-learner redesign).
+
+2. modules/debiasing.py
+   - Fixed `estimator=meta_learner.meta_model` → `estimator=meta_learner`
+     (meta_model attribute no longer exists after meta-learner redesign).
+
+3. modules/drift_monitor.py
+   - Fixed drift_score extraction: old code returned a boolean (True/False) from
+     Evidently's `dataset_drift` key. Now correctly reads `share_of_drifted_columns`
+     (float) first, with boolean fallback.
+
+4. week3_run.py
+   - Removed accidental double joblib load on line 19:
+     `joblib.dump(joblib.load(...), ...)` was re-saving the file immediately after
+     loading it for no reason.
+
+5. week2_run.py
+   - AUC was being reported on training data (always 1.0000, misleading).
+     Now evaluates on Site B holdout set for honest out-of-sample metrics.
+
+6. dashboard/app.py
+   - Fixed circular y_true definition in Algorithmic Fairness section.
+     Old code: y_true = predictions > 0.5 (model predicting against itself).
+     New code: loads real ground truth from data/processed/sepsis_b.csv.
+   - Fixed PyArrow serialization crash in audit log dataframe display.
+     drift_score column had mixed bool/float types; now explicitly cast to float.
+   - Added try/except guard around SHAP waterfall plot with bar-chart fallback
+     to prevent crash on edge-case patient profiles.
+   - Streamlit cache versioned (v2 → v3 → v4 → v5 → v6 → v7) across sessions
+     to force model reload after each backend rebuild.
+
+
+ARCHITECTURE CHANGES
+--------------------
+
+1. modules/fusion.py — FamedMetaLearner redesign (Sepsis fix)
+   - REMOVED: LogisticRegression meta-learner that caused stacking data leakage.
+     (XGBoost encoders were overfitting training set → meta-learner learned
+     polarized probabilities → all test patients showed >0.98 Sepsis risk.)
+   - REPLACED WITH: Probability Average Fusion. predict_proba now returns
+     np.mean(meta_X, axis=1) — a clean, leakage-free weighted average.
+   - FamedMetaLearner now inherits BaseEstimator + ClassifierMixin for
+     sklearn/Fairlearn compatibility.
+
+2. data_generator.py — Sepsis label rebalancing
+   - Sigmoid coefficient changed: -10 → -5, threshold: 0.50 → 0.65
+   - Old: ~80% of patients were synthetically labeled as Sepsis-positive.
+   - New: ~40% positive rate (clinically realistic for high-acuity cohort).
+
+
+FACULTY SUGGESTIONS IMPLEMENTED
+---------------------------------
+
+1. modules/fusion.py — Confidence-Weighted Neutral Imputation
+   (Patent Claim 1 upgrade)
+   - Old: missing modality always imputed as flat 0.5 (dumb, passive).
+   - New: two-pass approach.
+       Pass 1 — compute scores from all present modalities.
+       Pass 2 — for absent modalities:
+           neutral = 0.5 + alpha * (mean_confidence - 0.5)
+     where mean_confidence = average of present modality scores.
+   - Effect: a missing sensor is no longer "neutral" — it is softly pulled
+     toward the evidence the available sensors already see.
+   - alpha parameter defaults to 0.5 (tunable).
+
+2. modules/fusion.py — Reliability-Weighted Fusion
+   (Patent Claim 1 upgrade — quality-aware self-adjusting weights)
+   - Added compute_reliability(df) function.
+     Reliability score for each modality based on:
+       a) Missing rate  — proportion of NaN values in the batch
+       b) Noise (CoV)   — mean coefficient of variation across columns
+     Formula:
+       reliability = 1.0 - 0.5 * missing_rate - 0.5 * tanh(mean_CoV)
+     Returns float in [0.01, 1.00].
+   - Added reliability_weights(reliabilities) function.
+     Converts raw scores to normalised fusion weights:
+       w_i = rel_i / sum(rel)
+   - Updated FamedMetaLearner.predict_proba(meta_X, weights=None):
+     When weights supplied: final = dot(meta_X, weights)
+     When None: falls back to equal weighting (backward compatible).
+   - dashboard/app.py: computes live reliability for heart_b + diabetes_b
+     batches on startup, derives weights, passes into every predict_proba call.
+   - Sidebar now shows "Modality Reliability (Live)" panel with progress bars
+     displaying per-modality reliability scores and weights.
+
+3. modules/drift_monitor.py — Graduated Response System
+   (replaces binary OK/ROLLBACK panic switch)
+   - Added classify_drift(drift_score) function with 4 tiers:
+       STABLE   (drift < 0.15) → CONTINUE — normal operation
+       WATCH    (0.15 – 0.30) → INCREASE_SAMPLING — flag batch for review
+       ALERT    (0.30 – 0.50) → RETRAIN_RECOMMENDED — notify data steward
+       ROLLBACK (> 0.50)      → ROLLBACK — immediate checkpoint fallback
+   - check_drift() now returns full event dict with:
+       status, action, description (in addition to drift_score).
+   - Audit log entries now include status, action, description fields.
+   - dashboard/app.py: Drift scan results display tier-specific colours,
+     icons, recommended actions, and a drift severity progress bar gauge.
+     Tier legend expander added for faculty presentation context.
+
+
+FILES CHANGED
+-------------
+modules/fusion.py
+modules/debiasing.py
+modules/drift_monitor.py
+week2_run.py
+week3_run.py
+data_generator.py
+dashboard/app.py
